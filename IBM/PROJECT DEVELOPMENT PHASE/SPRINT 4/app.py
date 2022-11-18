@@ -1,140 +1,269 @@
-#Importing Libraries
-import re
-import numpy as np
-import os
 from flask import Flask, app, request, render_template
-from keras import models
+import os
+import flask
+import re
+import flask_login
+
+import base64
+from PIL import Image
+
+from io import BytesIO
+import datetime
+import cv2
+import numpy as np
 from keras.models import load_model
-from keras.preprocessing import image
-from tensorflow.python.ops.gen_array_ops import concat
-from keras.applications.inception_v3 import preprocess_input
-import requests
-from flask import Flask, request, render_template, redirect, url_for
 from cloudant.client import Cloudant
+from cloudant.error import CloudantException
+from cloudant.result import Result, ResultByKey
 
-#Create Database
-client = Cloudant.iam('00cba18f-2150-4961-9102-f29b9aee35de-bluemix','ht_ByiEjrGeaitIZJTC-ri5_8Oq-dxTNHLGho1mpt0d5', connect=True)
-my_database = client.create_database('my_database')
 
-#Loading the Model
-model1 = load_model('Model/level.h5')
-model2 = load_model('Model/body.h5')
+model1 = load_model('G:/IBM-Project-45496-1660730474/Final Deliverable/Model/level.h5')
+model2 = load_model('G:/IBM-Project-45496-1660730474/Final Deliverable/Model/body.h5')
 
+
+def detect(frame,model1,f):
+    img = cv2.resize(frame,(244,244))
+    img = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+    if(np.max(img)>1):
+        img=img/255.0
+    img = np.array([img])
+
+    prediction = model1.predict(img)
+    if(f):
+        label= ['front','rear','side']
+    else:
+        label =['minor','moderate','severe']
+    preds = label[np.argmax(prediction)]
+    return preds
+
+
+
+client = Cloudant.iam('862d725c-4fb3-4619-bfcb-083c11c6a979-bluemix','QM5pS9ePdxMpe6Lh-8yIvNYoZ3SXtoIdQQKnyIRYlwFb',connect=True)
+name = 'name'
+email = 'a@b.c'
+password = '123'
+
+user_database = client.create_database('user_database')
+user_image_database = client.create_database('user_image_database')
+
+def image_database_updation(name,email,imagestr):
+    global user_image_database
+    now = datetime.datetime.now()
+    json_image_document={
+        'name':name,
+        'email':email,
+        'image':imagestr,
+        'datetime':now.strftime("%m/%d/%Y, %H:%M:%S") 
+    }
+    new_image_document  = user_image_database.create_document(json_image_document)
+    if(new_image_document.exists()):
+        print('database updated')
+    else:
+        print('database couldn\'t be edited')
+    return
+
+def image_database_retrieval():
+    global user_image_database
+    image_result_retrieved = Result(user_image_database.all_docs,include_docs=True)
+    image_result ={}
+    for i in image_result_retrieved:
+        if(i['doc']['email'] in image_result.keys()):
+            # like current date> rx date('str')
+            n = datetime.datetime.strptime(i['doc']['datetime'],'%m/%d/%Y, %H:%M:%S')  
+            o = datetime.datetime.strptime(image_result[i['doc']['email']]['date'],'%m/%d/%Y, %H:%M:%S')  
+            if(n>o):
+
+                image_result[i['doc']['email']] = {'name':i['doc']['name'],'image':i['doc']['image'],'date':i['doc']['datetime']}
+        else:
+            image_result[i['doc']['email']] = {'name':i['doc']['name'],'image':i['doc']['image'],'date':i['doc']['datetime']}
+    return(image_result)
+
+def database_updation(name,email,password):
+    global user_database
+    jsonDocument = {
+        'name':name,
+        'email':email,
+        'password':password
+    }
+    newDocument = user_database.create_document(jsonDocument)
+    if(newDocument.exists()):
+        print('database updated')
+    else:
+        print('database couldn\'t be edited')
+    return
+#database_updation(name,email,password)
+
+def database_retrieval():
+    global user_database
+    result_retrieved = Result(user_database.all_docs,include_docs=True)
+    #print(list(result_retrieved))
+    result = {}
+    for i in list(result_retrieved):
+        result[i['doc']['email']]={'name':i['doc']['name'],'password':i['doc']['password']}
+    return result
+#print(database_retrieval())
 app = Flask(__name__)
+app.secret_key = 'apple'
+login_manager = flask_login.LoginManager()
 
+login_manager.init_app(app)
+users = {'a@b.c': {'password': '123'}}
+class User(flask_login.UserMixin):
+    pass
+
+
+@login_manager.user_loader
+def user_loader(email):
+    data = database_retrieval()
+    if email not in data:
+        return
+
+    user = User()
+    user.id = email
+    user.name = data[email]['name']
+    return user
+
+
+@login_manager.request_loader
+def request_loader(request):
+    email = request.form.get('email')
+    data = database_retrieval()
+    if email not in data:
+        return
+
+    user = User()
+    user.id = email
+    user.name = data[email]['name']
+    return user
 @app.route('/')
 def index():
-    return render_template('index.html')
+    if(flask_login.current_user.is_authenticated):
+        return render_template('dashboard.html')
+    else:
+        return flask.redirect(flask.url_for('login'))
 
-@app.route('/index.html')
-def home():
-    return render_template('index.html')
-
-@app.route('/register.html')
+@app.route('/register',methods = ['GET','POST'])
 def register():
-    return render_template('register.html')
-
-@app.route('/afterreg', methods=['POST'])
-def afterreg():
-    x = [x for x in request.form.values()]
-    print(x)
-    data = {
-        '_id': x[1],
-        'name': x[0],
-        'psw': x[2]
-    }
-    print(data)
-
-    query = {'_id': {'$eq': data['_id']}}
-
-    docs = my_database.get_query_result(query)
-    print(docs)
-
-    print(len(docs.all()))
-
-    if(len(docs.all())==0):
-        url = my_database.create_document(data)
-        response = request.get(url)
-        return render_template('login.html', pred="Registration Successful, Please login using your details")
+    data = database_retrieval()
+    if(flask.request.method == 'GET'):
+        return render_template('register.html')
+    email = flask.request.form['email']
+    if(email in data):
+        return render_template('register.html',flash_message='True')
     else:
-        return render_template('register.html', pred="You are already a member, Please login using your details")
-    
-@app.route('/login.html')
+        database_updation(flask.request.form['name'],email,flask.request.form['password'])
+        #users[email]={'password':flask.request.form['password']}
+        user  = User()
+        user.id = email
+        user.name = flask.request.form['name']
+        flask_login.login_user(user)
+        return render_template('dashboard.html',flash_message='True')
+
+
+
+@app.route('/login',methods =['GET','POST'])
 def login():
-    return render_template('login.html')
-    
-@app.route('/afterlogin', methods=['POST'])
-def afterlogin():
-    user = request.form['_id']
-    passw = request.form['psw']
-    print(user,passw)
+    data = database_retrieval()
+    if(flask.request.method == 'GET'):
+        
+        return render_template('login.html',flash_message='False')
+    email = flask.request.form['email']
+    if(email in data and flask.request.form['password']==data[email]['password']):
+        user  = User()
+        user.id = email
+        flask_login.login_user(user)
+        return render_template('dashboard.html',flash_message='Fal')
+    #flask.flash('invalid credentials !!!')
+    return render_template('login.html',flash_message="True")
+    #error = 'inavlid credentials')
 
-    query = {'_id': {'$eq': user}}
 
-    docs = my_database.get_query_result(query)
-    print(docs)
+@app.route('/dashboard',methods = ['GET','POST'])
+@flask_login.login_required
+def dashboard():
+    if(flask.request.method == 'GET'):
+        return render_template('dashboard.html',flash_message='False')
+    email = flask.request.form['email']
+    if(email in users and flask.request.form['password']==users[email]['password']):
+        user  = User()
+        user.id = email
+        flask_login.login_user(user)
+        return render_template('dashboard.html',flash_message="Fal")
+    return render_template('dashboard.html',flash_message="Fals")
 
-    print(len(docs.all()))
 
-    if(len(docs.all())==0):
-        return render_template('login.html', pred="The Username is not found")
-    else:
-        if((user==docs[0][0]['_id'] and passw==docs[0][0]['psw'])):
-            return redirect(url_for('prediction'))
-        else:
-            print('Invalid User')
-
-@app.route('/logout.html')
+@app.route('/logout')
+@flask_login.login_required
 def logout():
+    flask_login.logout_user()
     return render_template('logout.html')
 
-@app.route('/prediction.html')
+
+@app.route('/prediction',methods = ['GET','POST'])
+@flask_login.login_required
 def prediction():
-    return render_template('prediction.html')
+    from keras.models import load_model
 
-@app.route('/result')
-def res():
-    if request.methods=="POST":
-        f=request.files['image']
-        basepath=os.path.dirname(__file__)
-        filepath=os.path.join(basepath,'uploads',f.filename)
-        f.save(filepath)
 
-        img=image.load_img(filepath,target_size=(256,256))
-        x=image.img_to_array(img)
-        x=np.expand_dims(x,axis=0)
+    model1 = load_model('G:/IBM-Project-45496-1660730474/Final Deliverable/Model/level.h5')
+    model2 = load_model('G:/IBM-Project-45496-1660730474/Final Deliverable/Model/body.h5')
 
-        img_data=preprocess_input(x)
-        prediction1=np.argmax(model1.predict(img_data))
-        prediction2=np.argmax(model2.predict(img_data))
-
-        index1=['front','rear','side']
-        index2=['minor','moderate','severe']
-
-        result1 = index1[prediction1]
-        result2 = index2[prediction2]
-        if(result1 == "front" and result2 == "minor"):
-            value = "3000 - 5000 INR"
-        elif(result1 == "front" and result2 == "moderate"):
-            value = "6000 - 8000 INR"
-        elif(result1 == "front" and result2 == "severe"):
-            value = "9000 - 11000 INR"
-        elif(result1 == "rear" and result2 == "minor"):
-            value = "4000 - 6000 INR"
-        elif(result1 == "rear" and result2 == "moderate"):
-            value = "7000 - 9000 INR"
-        elif(result1 == "rear" and result2 == "severe"):
-            value = "11000 - 13000 INR"
-        elif(result1 == "side" and result2 == "minor"):
-            value = "6000 - 8000 INR"
-        elif(result1 == "side" and result2 == "moderate"):
-            value = "9000 - 11000 INR"
-        elif(result1 == "side" and result2 == "severe"):
-            value = "12000 - 15000 INR"
+    if(flask.request.method=='POST'):
+        img = flask.request.files['myFile']
+        try:
+            os.remove('G:\IBM-Project-45496-1660730474\Final Deliverable\static\imagedata\save.png')
+        except:
+            pass
+        imgstr = base64.b64encode(img.read()).decode('utf-8')
+        image_database_updation(flask_login.current_user.name,flask_login.current_user.id,imgstr)
+        data = image_database_retrieval()
+        print(flask_login.current_user.id)
+        #print(len(base64.b64decode(data[flask_login.current_user.id]['image'].strip())))
+        image = Image.open(BytesIO(base64.b64decode(data[flask_login.current_user.id]['image'])))
+        img_retrived = np.array(image)
+        '''img_retrived = np.asarray(base64.b64decode(data[flask_login.current_user.id]['image']))
+        print(data[flask_login.current_user.id]['image'])
+        print(img_retrived.shape)'''
+        #img_retrived = np.resize(img_retrived,(244,244))
+        img_retrive = Image.fromarray(img_retrived)
+        img_retrive.save('G:\IBM-Project-45496-1660730474\Final Deliverable\static\imagedata\save.png')
+        '''img_retrived = np.frombuffer(
+            BytesIO(
+                base64.b64decode(data[flask_login.current_user.id]['image'])
+                )
+            )'''
+        print('################################')
+        result1=detect(img_retrived,model1=model2,f=True)
+        result2 = detect(img_retrived,model1=model1,f=False)
+        value=''
+        if(result1 == 'front' and result2 == 'minor'):
+            value = '3000 - 5000 INR'
+        elif(result1 == 'front' and result2 == 'moderate'):
+            value = '6000 - 8000 INR'
+        elif(result1 == 'front' and result2 == 'severe'):
+            value = '9000 - 11000 INR'
+        elif(result1 == 'rear' and result2 == 'minor'):
+            value = '4000 - 6000 INR'
+        elif(result1 == 'rear' and result2 == 'moderate'):
+            value = '7000 - 9000 INR'
+        elif(result1 == 'rear' and result2 == 'severe'):
+            value = '11000 - 13000 INR'
+        elif(result1 == 'side' and result2 == 'minor'):
+            value = '6000 - 8000 INR'
+        elif(result1 == 'side' and result2 == 'moderate'):
+            value = '9000 - 11000 INR'
+        elif(result1 == 'side' and result2 == 'severe'):
+            value = '12000 - 15000 INR'
         else:
-            value = "16000 - 50000 INR"
+            value = '16000 - 50000 INR'
+        print(result1,result2,value)
+        print('################################')
+        img_retrived = Image.fromarray(img_retrived)
+        img_retrived.save('G:\IBM-Project-45496-1660730474\Final Deliverable\static\imagedata\save.png')
+        print('image uploaded and retrieved')
+        return render_template('prediction.html',prediction_text='{}'.format(value),flash_message='False')
 
-        return render_template('prediction.html',prediction=value)
+    return render_template('prediction.html',flash_message='True')
 
-if __name__=="__main__":
-    app.run(debug = False,port = 8080)
+if __name__ == '__main__':
+    app.run(debug=True)
